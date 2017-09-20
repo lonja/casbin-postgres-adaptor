@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package casbin-postgres-adaptor
+package casbin
 
 import (
 	"database/sql"
@@ -20,10 +20,10 @@ import (
 	"strings"
 
 	"github.com/casbin/casbin/model"
-	_ "github.com/lib/pq" // This is for MySQL initialization.
+	_ "github.com/lib/pq" // This is PostgreSQL driver
 )
 
-// Adapter represents the MySQL adapter for policy storage.
+// Adapter represents the PostgreSQL adapter for policy storage.
 type Adapter struct {
 	driverName     string
 	dataSourceName string
@@ -45,7 +45,15 @@ func (a *Adapter) createDatabase() error {
 	}
 	defer db.Close()
 
-	_, err = db.Exec("CREATE DATABASE IF NOT EXISTS casbin")
+	res := db.QueryRow("SELECT count(*) FROM pg_catalog.pg_database WHERE datname = 'casbin';")
+	var count int32
+	if err = res.Scan(&count); err != nil {
+		return err
+	}
+	if count == 1 {
+		return nil
+	}
+	_, err = db.Exec("CREATE DATABASE casbin")
 	return err
 }
 
@@ -53,8 +61,7 @@ func (a *Adapter) open() {
 	if err := a.createDatabase(); err != nil {
 		panic(err)
 	}
-
-	db, err := sql.Open(a.driverName, a.dataSourceName+"casbin")
+	db, err := sql.Open(a.driverName, a.dataSourceName+" dbname=casbin")
 	if err != nil {
 		panic(err)
 	}
@@ -69,14 +76,14 @@ func (a *Adapter) close() {
 }
 
 func (a *Adapter) createTable() {
-	_, err := a.db.Exec("CREATE table IF NOT EXISTS policy (ptype VARCHAR(10), v0 VARCHAR(256), v1 VARCHAR(256), v2 VARCHAR(256), v3 VARCHAR(256), v4 VARCHAR(256), v5 VARCHAR(256))")
+	_, err := a.db.Exec("CREATE TABLE IF NOT EXISTS policy (ptype VARCHAR(10), v1 VARCHAR(256), v2 VARCHAR(256), v3 VARCHAR(256), v4 VARCHAR(256))")
 	if err != nil {
 		panic(err)
 	}
 }
 
 func (a *Adapter) dropTable() {
-	_, err := a.db.Exec("DROP table policy")
+	_, err := a.db.Exec("DROP TABLE policy")
 	if err != nil {
 		panic(err)
 	}
@@ -101,15 +108,13 @@ func (a *Adapter) LoadPolicy(model model.Model) error {
 
 	var (
 		ptype string
-		v0    string
 		v1    string
 		v2    string
 		v3    string
 		v4    string
-		v5    string
 	)
 
-	rows, err := a.db.Query("select * from policy")
+	rows, err := a.db.Query("SELECT * FROM policy")
 	if err != nil {
 		return err
 	}
@@ -121,9 +126,6 @@ func (a *Adapter) LoadPolicy(model model.Model) error {
 		}
 
 		line := ptype
-		if v0 != "" {
-			line += ", " + v0
-		}
 		if v1 != "" {
 			line += ", " + v1
 		}
@@ -136,21 +138,23 @@ func (a *Adapter) LoadPolicy(model model.Model) error {
 		if v4 != "" {
 			line += ", " + v4
 		}
-		if v5 != "" {
-			line += ", " + v5
-		}
 
 		loadPolicyLine(line, model)
+		// log.Println(ptype, v1, v2, v3, v4)
 	}
 	err = rows.Err()
 	return err
 }
 
 func (a *Adapter) writeTableLine(stm *sql.Stmt, ptype string, rule []string) error {
-	params := make([]string, 7)
+	params := make([]interface{}, 0, 5)
 	params = append(params, ptype)
-	for i, v := range rule {
-		params[i] = v
+	for _, v := range rule {
+		params = append(params, v)
+	}
+	need := 5 - len(params)
+	for i := 0; i < need; i++ {
+		params = append(params, "")
 	}
 	if _, err := stm.Exec(params...); err != nil {
 		return err
@@ -166,7 +170,7 @@ func (a *Adapter) SavePolicy(model model.Model) error {
 	a.dropTable()
 	a.createTable()
 
-	stm, err := a.db.Prepare("insert into policy values($1, $2, $3, $4, $5, $6, $7)")
+	stm, err := a.db.Prepare("INSERT INTO policy VALUES(?, ?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}
